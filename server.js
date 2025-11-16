@@ -1,356 +1,222 @@
-// ============================================
-// BABY - AUTOMATED PAYMENT BACKEND SERVER
-// ============================================
-// This handles PayPal webhooks and auto-activates tokens
+// ==========================================================
+// BABY AI - AUTOMATED PAYMENT + EMAIL BACKEND (FINAL VERSION)
+// ==========================================================
 
-const express = require('express');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-const crypto = require('crypto');
+const express = require("express");
+const bodyParser = require("body-parser");
+const cors = require("cors");
+const nodemailer = require("nodemailer");
 
 const app = express();
-app.use(bodyParser.json());
 app.use(cors());
+app.use(bodyParser.json({ limit: "5mb" }));
 
-// ============================================
-// CONFIG - CHANGE THESE AFTER SETUP!
-// ============================================
-const PORT = process.env.PORT || 3000; // Railway sets this automatically
-const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || "TEMP_ID"; // Add in Railway after PayPal setup
-const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || ""; // Add in Railway after SendGrid setup
+// ==========================================================
+// CONFIG AREA
+// ==========================================================
 
-// Token packages
+// Gmail sender (your Gmail + app password)
+const EMAIL_USER = "samallenmik@gmail.com";
+const EMAIL_PASS = "ehfg lanz lnxu ivmf";
+
+// Port for Railway
+const PORT = process.env.PORT || 3000;
+
+// Your token packages
 const PACKAGES = {
-  basic: { price: 5, tokens: 2000, name: "Basic Package" },
-  premium: { price: 10, tokens: 5000, name: "Premium Package" }
+  basic: { price: 5, tokens: 2000 },
+  premium: { price: 10, tokens: 5000 }
 };
 
-// Simple in-memory database (use MongoDB/PostgreSQL in production)
+// In-memory DB (replace later with Mongo/Postgres)
 const users = {};
 const payments = [];
 
-// ============================================
-// HELPER: Generate activation code for user
-// ============================================
+// ==========================================================
+// EMAIL SENDER (GMAIL SMTP)
+// ==========================================================
+
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: EMAIL_USER,
+    pass: EMAIL_PASS
+  }
+});
+
+async function sendActivationEmail(toEmail, activationCode, tokens) {
+  const mailOptions = {
+    from: `"BABY AI Tokens" <${EMAIL_USER}>`,
+    to: toEmail,
+    subject: "🎉 Your BABY AI Activation Code",
+    html: `
+      <h2>🎉 Your BABY AI Activation Code</h2>
+      <p>Thank you for your payment.</p>
+      <p>Your activation code is:</p>
+      <h1 style="color:#0ea5e9;">${activationCode}</h1>
+      <p>Paste this inside the BABY Chrome extension to activate your ${tokens} tokens.</p>
+      <br>
+      <p>Regards,<br>BABY AI Team</p>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log("📧 Email sent →", toEmail);
+  } catch (err) {
+    console.error("❌ Email sending failed:", err.message);
+  }
+}
+
+// ==========================================================
+// HELPER — Generate Activation Code
+// ==========================================================
+
 function generateActivationCode(email, tokens) {
   const expiryDate = new Date();
-  expiryDate.setDate(expiryDate.getDate() + 30); // 30 days from now
-  
+  expiryDate.setDate(expiryDate.getDate() + 30);
+
   const userData = {
-    email: email,
-    tokens: tokens,
+    email,
+    tokens,
     purchaseDate: new Date().toISOString(),
     expiryDate: expiryDate.toISOString(),
     isActive: true
   };
-  
+
   users[email] = userData;
-  
-  // Generate code that extension can use
-  const activationCode = Buffer.from(JSON.stringify(userData)).toString('base64');
-  
-  return activationCode;
+
+  // Encode the activation object
+  return Buffer.from(JSON.stringify(userData)).toString("base64");
 }
 
-// ============================================
-// ENDPOINT: PayPal Webhook (Auto-activation!)
-// ============================================
-app.post('/webhook/paypal', async (req, res) => {
-  console.log('📥 PayPal webhook received!');
-  
-  const payment = req.body;
-  
-  // Verify webhook signature (security!)
-  const webhookId = req.headers['paypal-transmission-id'];
-  const timestamp = req.headers['paypal-transmission-time'];
-  const signature = req.headers['paypal-transmission-sig'];
-  
-  // TODO: Verify signature with PayPal API
-  // For now, we'll trust it (add verification in production!)
-  
-  // Check if payment is completed
-  if (payment.event_type === 'PAYMENT.SALE.COMPLETED') {
-    const payerEmail = payment.resource.payer.email_address;
-    const amount = parseFloat(payment.resource.amount.total);
-    const paymentId = payment.resource.id;
-    
-    console.log(`✅ Payment received: ${amount} from ${payerEmail}`);
-    
-    // Determine package based on amount
-    let packageType = 'basic';
-    if (amount >= 10) packageType = 'premium';
-    
-    const pkg = PACKAGES[packageType];
-    
-    // Generate activation code
-    const activationCode = generateActivationCode(payerEmail, pkg.tokens);
-    
-    // Store payment record
-    payments.push({
-      paymentId: paymentId,
-      email: payerEmail,
-      amount: amount,
-      tokens: pkg.tokens,
-      date: new Date().toISOString(),
-      activationCode: activationCode
-    });
-    
-    // Send email with activation code
-    if (SENDGRID_API_KEY) {
-      await sendActivationEmail(payerEmail, activationCode, pkg.tokens);
-    } else {
-      console.log(`📧 EMAIL NOT CONFIGURED - Manual code for ${payerEmail}:`);
-      console.log(`   Code: ${activationCode}`);
-      console.log(`   Tokens: ${pkg.tokens}`);
-    }
-    
-    res.status(200).send('OK');
-  } else {
-    res.status(200).send('Event ignored');
+// ==========================================================
+// PAYPAL WEBHOOK HANDLER
+// ==========================================================
+
+app.post("/webhook/paypal", async (req, res) => {
+  console.log("📥 PayPal webhook received");
+
+  const body = req.body;
+
+  // We trust webhook for now (no verification)
+  if (body.event_type !== "PAYMENT.SALE.COMPLETED") {
+    return res.status(200).send("Ignored");
   }
+
+  const payerEmail = body.resource.payer.email_address;
+  const amount = parseFloat(body.resource.amount.total);
+
+  console.log(`💰 Payment: $${amount} from ${payerEmail}`);
+
+  // Decide package
+  let pkg = PACKAGES.basic;
+  if (amount >= 10) pkg = PACKAGES.premium;
+
+  // Generate activation code
+  const activationCode = generateActivationCode(payerEmail, pkg.tokens);
+
+  // Save payment
+  payments.push({
+    email: payerEmail,
+    amount,
+    tokens: pkg.tokens,
+    activationCode,
+    date: new Date().toISOString()
+  });
+
+  // Send email
+  await sendActivationEmail(payerEmail, activationCode, pkg.tokens);
+
+  res.status(200).send("OK");
 });
 
-// ============================================
-// HELPER: Send activation email
-// ============================================
-async function sendActivationEmail(email, code, tokens) {
-  if (!SENDGRID_API_KEY) {
-    console.log('SendGrid not configured, skipping email');
-    return;
-  }
-  
-  try {
-    const sgMail = require('@sendgrid/mail');
-    sgMail.setApiKey(SENDGRID_API_KEY);
-    
-    const msg = {
-      to: email,
-      from: 'support@yourdomain.com', // CHANGE THIS to your verified sender email
-      subject: '🎉 Your BABY Activation Code - 2000 Tokens!',
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <style>
-            body { font-family: Arial, sans-serif; background: #f5f5f5; padding: 20px; }
-            .container { background: white; max-width: 600px; margin: 0 auto; padding: 40px; border-radius: 10px; }
-            .header { text-align: center; color: #00eaff; font-size: 32px; margin-bottom: 20px; }
-            .code-box { background: #0c0f1c; color: #00eaff; padding: 20px; border-radius: 10px; font-size: 24px; text-align: center; margin: 20px 0; font-family: monospace; letter-spacing: 2px; }
-            .steps { background: #f9f9f9; padding: 20px; border-radius: 10px; margin: 20px 0; }
-            .step { margin: 10px 0; padding-left: 30px; position: relative; }
-            .step:before { content: "✓"; position: absolute; left: 0; color: #00eaff; font-weight: bold; font-size: 20px; }
-            .footer { text-align: center; color: #666; font-size: 14px; margin-top: 30px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">🍼 BABY AI Assistant</div>
-            
-            <h2>🎉 Welcome to BABY Premium!</h2>
-            <p>Thank you for your purchase! You now have <strong>${tokens} tokens</strong> ready to use.</p>
-            
-            <h3>Your Activation Code:</h3>
-            <div class="code-box">${code}</div>
-            
-            <div class="steps">
-              <h3>How to Activate:</h3>
-              <div class="step">Open your BABY extension in Chrome</div>
-              <div class="step">Click the button "📝 Have Activation Code?"</div>
-              <div class="step">Paste the code above</div>
-              <div class="step">Click "ACTIVATE TOKENS"</div>
-              <div class="step">Start using your ${tokens} tokens!</div>
-            </div>
-            
-            <p><strong>Token Details:</strong></p>
-            <ul>
-              <li>Tokens: ${tokens}</li>
-              <li>Valid for: 30 days from activation</li>
-              <li>Select 10/15/25/50 tokens per search</li>
-            </ul>
-            
-            <p><strong>Need Help?</strong><br>
-            Reply to this email or contact support.</p>
-            
-            <div class="footer">
-              <p>Thank you for using BABY AI Assistant!<br>
-              "Your Best AI Bot You'll Ever Need"</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `
-    };
-    
-    await sgMail.send(msg);
-    console.log(`✅ Activation email sent to ${email}`);
-  } catch (error) {
-    console.error(`❌ Email send failed:`, error.message);
-  }
-}
+// ==========================================================
+// API — Activate Code (Extension uses this)
+// ==========================================================
 
-// ============================================
-// ENDPOINT: Activate tokens (Extension calls this!)
-// ============================================
-app.post('/api/activate', (req, res) => {
-  const { activationCode } = req.body;
-  
+app.post("/api/activate", (req, res) => {
   try {
-    const userData = JSON.parse(Buffer.from(activationCode, 'base64').toString());
-    
-    // Check if code is valid
-    if (users[userData.email] && users[userData.email].isActive) {
-      res.json({
-        success: true,
-        tokens: userData.tokens,
-        expiryDate: userData.expiryDate,
-        message: `${userData.tokens} tokens activated! Valid until ${new Date(userData.expiryDate).toLocaleDateString()}`
-      });
-    } else {
-      res.json({
+    const decoded = JSON.parse(
+      Buffer.from(req.body.activationCode, "base64").toString()
+    );
+
+    if (!users[decoded.email] || !users[decoded.email].isActive) {
+      return res.json({
         success: false,
-        message: 'Invalid or expired activation code'
+        message: "Invalid activation code"
       });
     }
-  } catch (error) {
-    res.json({
+
+    return res.json({
+      success: true,
+      tokens: decoded.tokens,
+      expiryDate: decoded.expiryDate,
+      message: `${decoded.tokens} tokens activated!`
+    });
+  } catch (err) {
+    return res.json({
       success: false,
-      message: 'Invalid activation code format'
+      message: "Invalid activation code format"
     });
   }
 });
 
-// ============================================
-// ENDPOINT: Check if user needs renewal
-// ============================================
-app.post('/api/check-expiry', (req, res) => {
-  const { email } = req.body;
-  
-  if (!users[email]) {
-    res.json({
-      needsRenewal: false,
-      message: 'User not found'
-    });
-    return;
-  }
-  
-  const user = users[email];
-  const expiryDate = new Date(user.expiryDate);
-  const now = new Date();
-  const daysLeft = Math.ceil((expiryDate - now) / (1000 * 60 * 60 * 24));
-  
-  if (daysLeft <= 0) {
-    res.json({
-      needsRenewal: true,
-      message: `Your tokens expired! Purchase again to continue.`,
-      daysLeft: 0
-    });
-  } else if (daysLeft <= 7) {
-    res.json({
-      needsRenewal: false,
-      showReminder: true,
-      message: `${daysLeft} days left! Renew soon.`,
-      daysLeft: daysLeft
-    });
-  } else {
-    res.json({
-      needsRenewal: false,
-      showReminder: false,
-      daysLeft: daysLeft
-    });
-  }
-});
+// ==========================================================
+// CHECK BALANCE / EXPIRY
+// ==========================================================
 
-// ============================================
-// ENDPOINT: Check token balance
-// ============================================
-app.post('/api/balance', (req, res) => {
+app.post("/api/balance", (req, res) => {
   const { email, tokenBalance } = req.body;
-  
+
   if (!users[email]) {
-    res.json({
-      status: 'no_subscription',
-      message: 'No active subscription'
+    return res.json({
+      status: "no_subscription",
+      message: "No active subscription found"
     });
-    return;
   }
-  
+
   const user = users[email];
-  const expiryDate = new Date(user.expiryDate);
   const now = new Date();
-  
-  // Check if expired
-  if (now > expiryDate) {
-    res.json({
-      status: 'expired',
-      message: '30 days expired! Buy tokens again.',
-      showPaymentLink: true
+  const expiry = new Date(user.expiryDate);
+
+  if (now > expiry) {
+    return res.json({
+      status: "expired",
+      message: "Your tokens expired! Buy again."
     });
-    return;
   }
-  
-  // Check if tokens low
+
   if (tokenBalance < 100) {
-    res.json({
-      status: 'low_tokens',
-      message: `Only ${tokenBalance} tokens left! Buy more?`,
-      showPaymentLink: true
+    return res.json({
+      status: "low_tokens",
+      message: "⚠️ Low tokens — buy more!"
     });
-    return;
   }
-  
-  // All good!
-  res.json({
-    status: 'active',
-    balance: tokenBalance,
-    expiryDate: user.expiryDate
+
+  return res.json({
+    status: "active",
+    expiryDate: user.expiryDate,
+    balance: tokenBalance
   });
 });
 
-// ============================================
-// ENDPOINT: Manual activation (for testing)
-// ============================================
-app.post('/api/manual-activate', (req, res) => {
-  const { email, tokens } = req.body;
-  
-  const code = generateActivationCode(email, tokens || 2000);
-  
-  res.json({
-    success: true,
-    activationCode: code,
-    message: `Use this code in extension: ${code}`
-  });
+// ==========================================================
+// ADMIN — View all payments
+// ==========================================================
+
+app.get("/api/admin/payments", (req, res) => {
+  res.json(payments);
 });
 
-// ============================================
-// ENDPOINT: Get all payments (admin)
-// ============================================
-app.get('/api/admin/payments', (req, res) => {
-  res.json({
-    total: payments.length,
-    payments: payments
-  });
-});
-
-// ============================================
+// ==========================================================
 // START SERVER
-// ============================================
+// ==========================================================
+
 app.listen(PORT, () => {
   console.log(`
-╔════════════════════════════════════════╗
-║  🍼 BABY PAYMENT SERVER RUNNING!      ║
-╚════════════════════════════════════════╝
-
-Server: http://localhost:${PORT}
-PayPal Webhook: http://localhost:${PORT}/webhook/paypal
-
-📋 Endpoints:
-- POST /webhook/paypal      → PayPal sends payment notification
-- POST /api/activate        → Extension activates tokens
-- POST /api/check-expiry    → Check if renewal needed
-- POST /api/balance         → Check token status
-- POST /api/manual-activate → Generate code manually
-- GET  /api/admin/payments  → View all payments
-
-✅ Ready to receive payments!
-  `);
+═══════════════════════════════════════
+   🍼 BABY AI BACKEND RUNNING ON PORT ${PORT}
+   PAYPAL AUTO → ACTIVATION → EMAIL READY
+═══════════════════════════════════════`);
 });
