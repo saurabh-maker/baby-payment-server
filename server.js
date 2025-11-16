@@ -186,7 +186,7 @@ async function sendActivationEmail(email, code, tokens) {
   } catch (error) {
     console.error(`❌ Email send failed:`, error.message);
   }
-});
+}
 
 // ============================================
 // ENDPOINT: Activate tokens (Extension calls this!)
