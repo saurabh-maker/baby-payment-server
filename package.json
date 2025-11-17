@@ -1,8 +1,9 @@
 {
-  "name": "baby-payment-server",
+  "name": "baby-ai-backend",
   "version": "1.0.0",
-  "description": "BABY AI Assistant - Automated Payment Backend",
+  "description": "BABY AI Assistant Backend — Payments, Token System, OpenAI Proxy",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js"
   },
@@ -10,7 +11,9 @@
     "express": "^4.18.2",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
-    "@sendgrid/mail": "^7.7.0"
+    "nodemailer": "^6.9.8",
+    "dotenv": "^16.3.1",
+    "node-fetch": "^3.3.2"
   },
   "engines": {
     "node": "18.x"
