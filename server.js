@@ -9,47 +9,39 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: "10mb" }));
 
-// REQUIRED ENV VARS
+// -------------------- ENV VARIABLES --------------------
 const MONGO_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGODB_DBNAME;
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
-
-// DEBUG: Log port info
-console.log("PORT from env:", process.env.PORT);
 
 if (!MONGO_URI) console.log("❌ MONGODB_URI missing");
 if (!DB_NAME) console.log("❌ MONGODB_DBNAME missing");
 if (!OPENAI_KEY) console.log("❌ OPENAI_API_KEY missing");
 
 const FREE_CREDITS = 50;
-const PAID_PACK = 500;
 
+// -------------------- DB SETUP -------------------------
 let db, Users;
 
-// ----------------- CONNECT DB -----------------
 async function connectDB() {
   if (db) return db;
-  try {
-    const client = new MongoClient(MONGO_URI);
-    await client.connect();
-    db = client.db(DB_NAME);
-    Users = db.collection("users");
-    console.log("✅ MongoDB Connected");
-    return db;
-  } catch (err) {
-    console.log("❌ MongoDB Connection Error:", err.message);
-    throw err;
-  }
+
+  const client = new MongoClient(MONGO_URI);
+  await client.connect();
+
+  db = client.db(DB_NAME);
+  Users = db.collection("users");
+
+  console.log("✅ MongoDB Connected");
+  return db;
 }
 
-connectDB().catch(err => {
-  console.log("⚠️ Initial DB connection failed, will retry on requests");
-});
+connectDB().catch(err => console.log("⚠️ DB init failed, will retry:", err.message));
 
-// ----------------- HEALTH CHECK -----------------
+// -------------------- HEALTH CHECK ---------------------
 app.get("/", (req, res) => {
-  res.json({ 
-    status: "ok", 
+  res.json({
+    status: "ok",
     message: "BABY AI Server Running",
     timestamp: new Date().toISOString()
   });
@@ -59,27 +51,32 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// ----------------- REGISTER USER -----------------
+// -------------------- REGISTER USER --------------------
 app.post("/api/register", async (req, res) => {
   try {
     await connectDB();
     const { email, deviceId } = req.body;
-    
+
     if (!email || !deviceId) {
       return res.json({ success: false, message: "Missing email or deviceId" });
     }
 
-    let user = await Users.findOne({ deviceId });
+    // 🔥 FIXED: Check by BOTH email OR deviceId
+    let user = await Users.findOne({
+      $or: [{ email }, { deviceId }]
+    });
 
+    // If user already exists → return stored credits
     if (user) {
       return res.json({
         success: true,
-        freeCredits: 0,
+        freeCredits: user.freeCredits || 0,
         paidCredits: user.paidCredits || 0,
-        message: "Free trial already used on this device"
+        message: "User already registered"
       });
     }
 
+    // 🔥 NEW USER
     await Users.insertOne({
       email,
       deviceId,
@@ -101,7 +98,7 @@ app.post("/api/register", async (req, res) => {
   }
 });
 
-// ----------------- GET BALANCE -----------------
+// -------------------- GET BALANCE -----------------------
 app.post("/api/balance", async (req, res) => {
   try {
     await connectDB();
@@ -121,29 +118,38 @@ app.post("/api/balance", async (req, res) => {
       free: user.freeCredits,
       paid: user.paidCredits
     });
+
   } catch (err) {
     console.log("Balance error:", err.message);
     return res.json({ success: false, message: "Server error", free: 0, paid: 0 });
   }
 });
 
-// ----------------- OPENAI PROXY -----------------
+// -------------------- OPENAI PROXY ----------------------
 app.post("/api/openai", async (req, res) => {
   try {
     await connectDB();
     const { email, prompt } = req.body;
 
+    if (!email || !prompt) {
+      return res.json({ success: false, message: "Missing email or prompt" });
+    }
+
     let user = await Users.findOne({ email });
     if (!user) return res.json({ success: false, message: "User not registered" });
 
+    // Deduct credits
     if (user.paidCredits > 0) {
       await Users.updateOne({ email }, { $inc: { paidCredits: -1 } });
-    } else if (user.freeCredits > 0) {
+    } 
+    else if (user.freeCredits > 0) {
       await Users.updateOne({ email }, { $inc: { freeCredits: -1 } });
-    } else {
+    } 
+    else {
       return res.json({ success: false, message: "No searches left" });
     }
 
+    // Call OpenAI
     const ai = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -160,7 +166,10 @@ app.post("/api/openai", async (req, res) => {
     });
 
     const data = await ai.json();
-    if (data.error) return res.json({ success: false, message: data.error.message });
+
+    if (data.error) {
+      return res.json({ success: false, message: data.error.message });
+    }
 
     return res.json({
       success: true,
@@ -173,8 +182,7 @@ app.post("/api/openai", async (req, res) => {
   }
 });
 
-// ----------------- START SERVER -----------------
-// Use PORT from environment, or 8080 as fallback (Railway default)
+// -------------------- START SERVER ----------------------
 const PORT = parseInt(process.env.PORT, 10) || 8080;
 
 app.listen(PORT, "0.0.0.0", () => {
