@@ -37,10 +37,8 @@ connectDB();
 // ----------------- REGISTER USER -----------------
 app.post("/api/register", async (req, res) => {
   await connectDB();
-
   try {
     const { email, deviceId } = req.body;
-
     if (!email || !deviceId) {
       return res.json({ success: false, message: "Missing email or deviceId" });
     }
@@ -85,7 +83,6 @@ app.post("/api/balance", async (req, res) => {
   const { email } = req.body;
 
   let user = await Users.findOne({ email });
-
   if (!user) {
     return res.json({ success: false, message: "User not found", free: 0, paid: 0 });
   }
@@ -131,7 +128,6 @@ app.post("/api/openai", async (req, res) => {
     });
 
     const data = await ai.json();
-
     if (data.error) return res.json({ success: false, message: data.error.message });
 
     return res.json({
