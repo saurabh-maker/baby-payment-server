@@ -3,147 +3,148 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
-const fetch = (...args) => import("node-fetch").then(({default: f}) => f(...args));
+const { MongoClient } = require("mongodb");
+const fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: "10mb" }));
 
-// CONFIG
-const EMAIL_USER   = process.env.EMAIL_USER;
-const EMAIL_PASS   = process.env.EMAIL_PASS;
-const OPENAI_KEY   = process.env.OPENAI_API_KEY;
-const PORT         = process.env.PORT || 3000;
+// ENV Variables
+const EMAIL_USER = process.env.EMAIL_USER;
+const EMAIL_PASS = process.env.EMAIL_PASS;
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
+const MONGO_URI = process.env.MONGODB_URI;
+const DB_NAME = process.env.MONGODB_DBNAME;
+const PORT = process.env.PORT || 3000;
 
-// Token packages
-const PACKAGES = {
-  basic:   { price: 5,  tokens: 2000 },
-  premium: { price: 10, tokens: 5000 }
-};
+// Credit System
+const FREE_CREDITS = 50;
+const PAID_PACK = 500;  // $5 → 500 searches
 
-// Temp DB
-const users = {};
-const payments = [];
+// MongoDB Setup
+let db, Users, Payments;
 
-// EMAIL SYSTEM
+async function connectDB() {
+  if (db) return db;
+  const client = new MongoClient(MONGO_URI);
+  await client.connect();
+  db = client.db(DB_NAME);
+  Users = db.collection("users");
+  Payments = db.collection("payments");
+  console.log("✅ MongoDB Connected Successfully");
+}
+connectDB();
+
+// Email System
 const transporter = nodemailer.createTransport({
   service: "gmail",
-  auth: {
-    user: EMAIL_USER,
-    pass: EMAIL_PASS
-  }
+  auth: { user: EMAIL_USER, pass: EMAIL_PASS }
 });
 
-async function sendActivationEmail(toEmail, activationCode, tokens) {
+// Helper → send purchase email
+async function sendPurchaseEmail(toEmail, credits) {
   const mailOptions = {
-    from: `"BABY AI Tokens" <${EMAIL_USER}>`,
+    from: `"BABY AI Credits" <${EMAIL_USER}>`,
     to: toEmail,
-    subject: "🎉 Your BABY AI Activation Code",
+    subject: "Your BABY AI Credits are Added 🎉",
     html: `
-      <h2>🎉 Your BABY AI Activation Code</h2>
-      <p>Your activation code:</p>
-      <h1 style="color:#0ea5e9;">${activationCode}</h1>
-      <p>Use this inside the BABY Chrome Extension.</p>
-      <p>Tokens Added: <b>${tokens}</b></p>
-      <p>BABY AI Team</p>
+      <h2>🎉 Purchase Successful!</h2>
+      <p>You have received <b>${credits}</b> new AI searches.</p>
+      <p>Open your BABY AI extension — the balance will auto update.</p>
+      <br><p>BABY AI Team</p>
     `
   };
+  await transporter.sendMail(mailOptions);
+}
 
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log("📧 Email sent →", toEmail);
-  } catch (err) {
-    console.error("❌ Email Failed:", err.message);
+// ------------------------------------------------------------
+// REGISTER USER → email + deviceId
+// ------------------------------------------------------------
+app.post("/api/register", async (req, res) => {
+  await connectDB();
+
+  const { email, deviceId } = req.body;
+  if (!email || !deviceId) {
+    return res.json({ success: false, message: "Missing email or deviceId" });
   }
-}
 
-// GENERATE CODE
-function generateActivationCode(email, tokens) {
-  const expiry = new Date();
-  expiry.setDate(expiry.getDate() + 30);
+  // Check if this device already used free credits
+  const existingDevice = await Users.findOne({ deviceId });
 
-  const data = {
-    email,
-    tokens,
-    purchaseDate: new Date().toISOString(),
-    expiryDate: expiry.toISOString(),
-    isActive: true
-  };
-
-  users[email] = data;
-
-  return Buffer.from(JSON.stringify(data)).toString("base64");
-}
-
-// PAYPAL WEBHOOK
-app.post("/webhook/paypal", async (req, res) => {
-  console.log("📥 PayPal Webhook");
-
-  const payerEmail = req.body.resource.payer.email_address;
-  const amount     = parseFloat(req.body.resource.amount.total);
-
-  let pkg = PACKAGES.basic;
-  if (amount >= 10) pkg = PACKAGES.premium;
-
-  const activationCode = generateActivationCode(payerEmail, pkg.tokens);
-
-  payments.push({
-    email: payerEmail,
-    amount,
-    tokens: pkg.tokens,
-    activationCode,
-    date: new Date().toISOString()
-  });
-
-  await sendActivationEmail(payerEmail, activationCode, pkg.tokens);
-
-  res.status(200).send("OK");
-});
-
-// ACTIVATE TOKENS
-app.post("/api/activate", (req, res) => {
-  try {
-    const decoded = JSON.parse(Buffer.from(req.body.activationCode, "base64").toString());
-    const user    = users[decoded.email];
-
-    if (!user || !user.isActive) {
-      return res.json({ success: false, message: "Invalid activation code" });
-    }
-
+  if (existingDevice) {
     return res.json({
       success: true,
-      tokens: user.tokens,
-      expiryDate: user.expiryDate,
-      message: `${user.tokens} tokens activated!`
+      freeCredits: 0,
+      paidCredits: existingDevice.paidCredits || 0,
+      message: "Free trial already used on this device"
     });
-
-  } catch (err) {
-    return res.json({ success: false, message: "Invalid code format" });
   }
-});
 
-// TOKEN BALANCE
-app.post("/api/balance", (req, res) => {
-  const user = users[req.body.email];
-  if (!user) return res.json({ status: "no_subscription" });
+  // New Device → Give Free 50 Credits
+  const newUser = {
+    email,
+    deviceId,
+    freeCredits: FREE_CREDITS,
+    paidCredits: 0,
+    createdAt: new Date()
+  };
 
-  const now     = new Date();
-  const expires = new Date(user.expiryDate);
-
-  if (now > expires) return res.json({ status: "expired" });
+  await Users.insertOne(newUser);
 
   return res.json({
-    status: "active",
-    expiryDate: user.expiryDate,
-    balance: req.body.tokenBalance
+    success: true,
+    freeCredits: FREE_CREDITS,
+    paidCredits: 0,
+    message: "Free trial activated!"
   });
 });
 
-// OPENAI PROXY (SAFE)
-app.post("/api/openai", async (req, res) => {
-  try {
-    const { prompt, model = "gpt-4o-mini" } = req.body;
+// ------------------------------------------------------------
+// GET BALANCE
+// ------------------------------------------------------------
+app.post("/api/balance", async (req, res) => {
+  await connectDB();
+  const { email } = req.body;
 
+  const user = await Users.findOne({ email });
+  if (!user) {
+    return res.json({ success: false, message: "User not found", free: 0, paid: 0 });
+  }
+
+  return res.json({
+    success: true,
+    free: user.freeCredits,
+    paid: user.paidCredits
+  });
+});
+
+// ------------------------------------------------------------
+// OPENAI PROXY → Deduct Credits
+// ------------------------------------------------------------
+app.post("/api/openai", async (req, res) => {
+  await connectDB();
+  const { email, prompt, model = "gpt-4o-mini" } = req.body;
+
+  const user = await Users.findOne({ email });
+  if (!user) return res.json({ success: false, message: "User not registered" });
+
+  // Deduct paid credits first
+  if (user.paidCredits > 0) {
+    await Users.updateOne({ email }, { $inc: { paidCredits: -1 } });
+  }
+  else if (user.freeCredits > 0) {
+    await Users.updateOne({ email }, { $inc: { freeCredits: -1 } });
+  }
+  else {
+    return res.json({
+      success: false,
+      message: "No searches left. Buy 500 searches for $5."
+    });
+  }
+
+  // Call OpenAI
+  try {
     const ai = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -177,18 +178,57 @@ app.post("/api/openai", async (req, res) => {
   }
 });
 
-// ADMIN
-app.get("/api/admin/payments", (req, res) => {
-  res.json(payments);
+// ------------------------------------------------------------
+// PAYPAL WEBHOOK → Add 500 Credits
+// ------------------------------------------------------------
+app.post("/webhook/paypal", async (req, res) => {
+  await connectDB();
+
+  const payerEmail = req.body?.resource?.payer?.email_address;
+  if (!payerEmail) return res.status(200).send("ignored");
+
+  // Add credits
+  await Users.updateOne(
+    { email: payerEmail },
+    { $inc: { paidCredits: PAID_PACK } },
+    { upsert: true }
+  );
+
+  // Save to payment logs
+  await Payments.insertOne({
+    email: payerEmail,
+    creditsAdded: PAID_PACK,
+    amount: 5,
+    date: new Date()
+  });
+
+  // Notify user by email
+  await sendPurchaseEmail(payerEmail, PAID_PACK);
+
+  return res.status(200).send("OK");
 });
 
-// START
+// ------------------------------------------------------------
+// ADMIN → View Payments
+// ------------------------------------------------------------
+app.get("/api/admin/payments", async (req, res) => {
+  await connectDB();
+  const logs = await Payments.find().sort({ date: -1 }).toArray();
+  res.json(logs);
+});
+
+// ------------------------------------------------------------
+// START SERVER
+// ------------------------------------------------------------
 app.listen(PORT, () => {
   console.log(`
 ═══════════════════════════════════════
-   🍼 BABY AI BACKEND RUNNING ON PORT ${PORT}
-   ✔ PAYPAL READY
-   ✔ EMAIL READY
-   ✔ OPENAI PROXY READY
-═══════════════════════════════════════`);
+   🍼 BABY AI BACKEND LIVE ON PORT ${PORT}
+   ✔ MongoDB Connected
+   ✔ Free 50 Searches Per Device
+   ✔ Paid 500 Searches Pack Ready
+   ✔ OpenAI Proxy Ready
+   ✔ PayPal Webhook Ready
+═══════════════════════════════════════
+`);
 });
